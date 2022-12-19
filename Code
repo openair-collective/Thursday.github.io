@@ -1,0 +1,411 @@
+//-----------------------------
+//Thursday DACC control system
+//-----------------------------
+//complete automation mode program
+
+// libraries for sensors
+#include <Adafruit_BMP280.h> // pressure sensor
+#include <Adafruit_SCD30.h> // co2 sensor
+#include <Wire.h>
+
+// pressure sensor setup
+Adafruit_BMP280 bmp;
+
+float pressure = 0;
+float temp = 0;
+
+// co2 sensor setup
+Adafruit_SCD30 scd30_in;
+Adafruit_SCD30 scd30_out;
+
+float co2_in;
+float co2_out;
+
+// accelerometer sensor setup
+const int MPU_addr=0x68;
+int16_t AcX1,AcY1,AcZ1,Tmp1,GyX1,GyY1,GyZ1;
+int16_t AcX2,AcY2,AcZ2,Tmp2,GyX2,GyY2,GyZ2;
+
+int x1Ang;
+int y1Ang;
+int z1Ang;
+int x2Ang;
+int y2Ang;
+int z2Ang;
+ 
+int minVal=265;
+int maxVal=402;
+ 
+double x1;
+double x2;
+
+// high pressure tank pressure sensor
+const int pressureInput = A0; //select the analog input pin for the pressure transducer
+const int pressureZero = 102.4; //analog reading of pressure transducer at 0psi
+const int pressureMax = 921.6; //analog reading of pressure transducer at 100psi
+const int pressuretransducermaxPSI = 300; //psi value of transducer being used
+const int baudRate = 9600; //constant integer to set the baud rate for serial monitor
+const int sensorreadDelay = 1000; //constant integer to set the sensor read delay in milliseconds
+
+float hptPressure = 0; //variable to store the value coming from the pressure transducer
+
+//damper pins
+int open_damperOne = 22;
+int active_damperOne = 23;
+int open_damperTwo = 24;
+int active_damperTwo = 25;
+
+//fan pins
+int fan_onePin = 28;
+int fan_twoPin = 29;
+
+//heater pins
+int heaterPin = 32;
+
+int vacuumPin = 40;
+int compressorPin = 42;
+
+//solenoid valve pins
+int sv1_pin = 44; //valve between sorbent chamber & vacuum pump
+int sv2_pin = 45; //------------- vacuum pump & LPT
+int sv3_pin = 46; //------------- vacuum pump & atmosphere
+int sv5_pin = 48; //------------- compressor & HPT
+int sv6_pin = 49; //------------- compressor & sampling tank
+
+unsigned long sensorTime;
+unsigned long heatingTime;
+unsigned long desTime;
+
+unsigned long autoNextCount = 1;
+
+// function for selecting active I2C device on the I2C multiplexer
+void TCA9548A(uint8_t bus)
+{
+  Wire.beginTransmission(0x70);  // TCA9548A address
+  Wire.write(1 << bus);          // send byte to select bus
+  Wire.endTransmission();
+}
+
+void setup()
+{
+  //sensor setup
+  Wire.begin();
+  Serial.begin(baudRate);
+
+  // pressure sensor initialisation
+  TCA9548A(0);
+  bmp.begin(0x76, 0x60);
+
+  // inlet co2 sensor initialisation
+  TCA9548A(1);
+  scd30_in.begin();
+
+  // outlet co2 sensor initialisation
+  TCA9548A(2);
+  scd30_out.begin();
+
+  // inlet damper accelerometer initialisation
+  TCA9548A(3);
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+
+  // outlet damper accelerometer initialisation
+  TCA9548A(4);
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+
+  // I/O initialisation
+  pinMode(open_damperOne, OUTPUT);
+  pinMode(active_damperOne, OUTPUT);
+  pinMode(open_damperTwo, OUTPUT);
+  pinMode(active_damperTwo, OUTPUT);
+  pinMode(fan_onePin, OUTPUT);
+  pinMode(fan_twoPin, OUTPUT);
+  pinMode(heaterPin, OUTPUT);
+
+  pinMode(vacuumPin, OUTPUT);
+  pinMode(compressorPin, OUTPUT);
+  pinMode(sv1_pin, OUTPUT);
+  pinMode(sv2_pin, OUTPUT);
+  pinMode(sv3_pin, OUTPUT);
+  pinMode(sv5_pin, OUTPUT);
+  pinMode(sv6_pin, OUTPUT);
+
+  //Relay I (Adsorption) connection uses normally open, relay is active low
+  digitalWrite(open_damperOne, HIGH);
+  digitalWrite(active_damperOne, HIGH);
+  digitalWrite(open_damperTwo, HIGH);
+  digitalWrite(active_damperTwo, HIGH);
+  digitalWrite(fan_onePin, HIGH);
+  digitalWrite(fan_twoPin, HIGH);
+  digitalWrite(heaterPin, HIGH);
+
+  //Relay II (Desorption) connection uses normally open, relay is active low
+  digitalWrite(vacuumPin, HIGH);
+  digitalWrite(compressorPin, HIGH);
+  digitalWrite(sv1_pin, HIGH);
+  digitalWrite(sv2_pin, HIGH);
+  digitalWrite(sv3_pin, HIGH);
+  digitalWrite(sv5_pin, HIGH);
+  digitalWrite(sv6_pin, HIGH);
+
+  sensorTime = millis();
+}
+
+void loop()
+{
+  // Read the Pressure Sensor
+  TCA9548A(0);
+  pressure = bmp.readPressure()/100; // values in hPa
+  temp = bmp.readTemperature();
+
+  // Read input CO2 Sensor
+  TCA9548A(1);
+  if (scd30_in.dataReady())
+  {
+    if (!scd30_in.read())
+    { 
+      printf("Error reading sensor data");
+      return;
+    }
+
+    co2_in = scd30_in.CO2;
+  }
+
+  // Read output CO2 Sensor
+  TCA9548A(2);
+  if (scd30_out.dataReady())
+  {
+    if (!scd30_out.read())
+    { 
+      printf("Error reading sensor data");
+      return;
+    }
+
+    co2_out = scd30_out.CO2;
+  }
+
+  // Read input damper accelerometer angle
+  TCA9548A(3);
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_addr,14,true);
+  AcX1=Wire.read()<<8|Wire.read();
+  AcY1=Wire.read()<<8|Wire.read();
+  AcZ1=Wire.read()<<8|Wire.read();
+  int x1Ang = map(AcX1,minVal,maxVal,-90,90);
+  int y1Ang = map(AcY1,minVal,maxVal,-90,90);
+  int z1Ang = map(AcZ1,minVal,maxVal,-90,90);
+  
+  x1 = RAD_TO_DEG * (atan2(-y1Ang, -z1Ang)+PI);
+
+  // Read output damper accelerometer angle
+  TCA9548A(4);
+  Wire.beginTransmission(MPU_addr);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_addr,14,true);
+  AcX2=Wire.read()<<8|Wire.read();
+  AcY2=Wire.read()<<8|Wire.read();
+  AcZ2=Wire.read()<<8|Wire.read();
+  int x2Ang = map(AcX2,minVal,maxVal,-90,90);
+  int y2Ang = map(AcY2,minVal,maxVal,-90,90);
+  int z2Ang = map(AcZ2,minVal,maxVal,-90,90);
+  
+  x2 = RAD_TO_DEG * (atan2(-y2Ang, -z2Ang)+PI);
+
+  // Read HPT pressure sensor
+  hptPressure = analogRead(pressureInput); //reads value from input pin and assigns to variable
+  hptPressure = ((hptPressure-pressureZero)*pressuretransducermaxPSI)/(pressureMax-pressureZero); //conversion equation to convert analog reading to psi
+
+  if(millis() - sensorTime > 2000)
+  {
+    printf("Sorbent Chamber Pressure: %.2f hPa | Temperature: $.2f ℃ | Inlet CO2: %.2f ppm | Outlet CO2:  $.2f ppm | HPT Pressure: %.2f psi\r\n", pressure, temp, co2_in, co2_out, hptPressure);
+    sensorTime = millis();
+  }
+
+  switch (autoNextCount)
+  {
+    //open dampers and fans
+    case 1:
+      //check if dampers are in open position, if not open them
+      if ((x1 < 36 && x1 > 49)&&(x2 < 36 && x2 > 49))
+      {
+        digitalWrite(active_damperOne,LOW);
+        digitalWrite(active_damperTwo,LOW); 
+        digitalWrite(open_damperOne,LOW);
+        digitalWrite(open_damperTwo,LOW);
+      }
+      // once dampers are open, go to the next case
+      else
+      {
+        autoNextCount = 2;
+      }
+      break;
+      
+    case 2:  
+      //turn ON fans and hold dampers in position and monitor CO2
+      if((abs(co2_in - co2_out)/co2_in) > 0.001)
+      {
+        digitalWrite(fan_onePin,LOW);
+        digitalWrite(fan_twoPin,LOW);
+
+        digitalWrite(active_damperOne,HIGH);
+        digitalWrite(active_damperTwo,HIGH);
+        digitalWrite(open_damperOne,HIGH);
+        digitalWrite(open_damperTwo,HIGH);
+      }
+      // once the input and output CO2 values even out, adsorption is complete, go to next state
+      else
+      {
+        autoNextCount = 3;
+      }
+      break;
+      
+    case 3:
+      digitalWrite(fan_onePin,HIGH);
+      digitalWrite(fan_twoPin,HIGH);
+
+      // turn off the fans and close the dampers
+      if ((x1 < 318 && x1 > 321)&&(x2 < 318 && x2 > 321))
+      {
+        digitalWrite(active_damperOne,LOW);
+        digitalWrite(active_damperTwo,LOW);
+        digitalWrite(open_damperOne,HIGH);
+        digitalWrite(open_damperTwo,HIGH);
+      }
+      else
+      {
+        autoNextCount = 4;
+      }
+      break;
+    
+    //----------------------------------
+    //desorption cycle counter and cases
+    //----------------------------------
+    
+    // extracting excess air
+    case 4:
+      if (pressure > 200)
+      {
+        digitalWrite(sv1_pin, LOW);
+        digitalWrite(sv3_pin, LOW);
+        digitalWrite(vacuumPin, LOW);
+      }
+      else
+      {
+        digitalWrite(sv1_pin, HIGH);
+        digitalWrite(sv3_pin, HIGH);
+        digitalWrite(vacuumPin, HIGH);
+        autoNextCount = 5;
+        desTime = millis();
+      }
+      break;
+
+    // heat sorbent
+    // this heating cycle will last 30 minutes      
+    case 5:
+      heatingTime = millis() - desTime;
+      if(heatingTime <= (5*60*1000))
+        digitalWrite(heaterPin, LOW);
+      else if (heatingTime > (5*60*1000) && heatingTime <= (6.5*60*1000))
+        digitalWrite(heaterPin,HIGH);
+      else if (heatingTime > (6.5*60*1000) && heatingTime <= (8.5*60*1000))
+        digitalWrite(heaterPin, LOW);
+      else if (heatingTime > (8.5*60*1000) && heatingTime <= (10*60*1000))
+        digitalWrite(heaterPin,HIGH);
+      else if (heatingTime > (10*60*1000) && heatingTime <= (12*60*1000))
+        digitalWrite(heaterPin,LOW);
+      else if (heatingTime > (12*60*1000) && heatingTime <= (13.5*60*1000))
+        digitalWrite(heaterPin,HIGH);
+      else if (heatingTime > (13.5*60*1000) && heatingTime <= (15.5*60*1000))
+        digitalWrite(heaterPin,LOW);
+      else if (heatingTime > (15.5*60*1000) && heatingTime <= (17*60*1000))
+        digitalWrite(heaterPin,HIGH);
+      else if (heatingTime > (17*60*1000) && heatingTime <= (19*60*1000))
+        digitalWrite(heaterPin,LOW);
+      else if (heatingTime > (19*60*1000) && heatingTime <= (21*60*1000))
+        digitalWrite(heaterPin,HIGH);
+      else if (heatingTime > (21*60*1000) && heatingTime <= (22.5*60*1000))
+        digitalWrite(heaterPin,LOW);
+      else
+      {
+        digitalWrite(heaterPin,HIGH);
+        autoNextCount = 6;
+      }
+      break;
+      
+    //extract CO2
+    case 6:
+      if(abs(pressure > 100))
+      {
+        digitalWrite(sv1_pin, LOW);
+        digitalWrite(sv2_pin, LOW);
+        digitalWrite(vacuumPin, LOW);
+      }
+      else
+      {
+        digitalWrite(sv1_pin, HIGH);
+        digitalWrite(sv2_pin, HIGH);
+        digitalWrite(vacuumPin, HIGH);
+        autoNextCount = 7;
+        desTime = millis();
+      }
+      break;
+      
+    //store CO2 In samplingTank()
+    case 7:
+      if((millis() - desTime) < 30000)
+      {
+        digitalWrite(sv6_pin, LOW);
+        digitalWrite(compressorPin,LOW);
+      }
+      else
+      {
+        digitalWrite(compressorPin, HIGH);
+        digitalWrite(sv6_pin, HIGH);
+        autoNextCount = 8;
+      }
+      break;
+      
+    // store CO2 in high pressure tank
+    case 8: 
+      if(hptPressure < 150)
+      {
+        digitalWrite(sv5_pin, LOW);
+        digitalWrite(compressorPin, LOW);
+      }
+      else
+      {
+        digitalWrite(compressorPin, HIGH);
+        digitalWrite(sv5_pin, HIGH);
+        autoNextCount = 1;
+      }
+      break;
+      
+    default:
+      desTime = millis();
+      
+      digitalWrite(active_damperOne, HIGH);
+      digitalWrite(open_damperOne, HIGH);
+      digitalWrite(active_damperTwo, HIGH);
+      digitalWrite(open_damperTwo, HIGH);
+      digitalWrite(fan_onePin, HIGH);
+      digitalWrite(fan_twoPin, HIGH);
+      
+      digitalWrite(heaterPin, HIGH);
+      digitalWrite(vacuumPin, HIGH);
+      digitalWrite(compressorPin, HIGH);
+      digitalWrite(sv1_pin, HIGH);
+      digitalWrite(sv2_pin, HIGH);
+      digitalWrite(sv3_pin, HIGH);
+      digitalWrite(sv5_pin, HIGH);
+      digitalWrite(sv6_pin, HIGH);
+      break;
+  }
+}
